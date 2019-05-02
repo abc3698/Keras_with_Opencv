@@ -1,67 +1,76 @@
-import tensorflow as tf
-from tensorflow.examples.tutorials.mnist import input_data
-from tensorflow.python.framework import graph_util
-from tensorflow.python.platform import gfile
+import tensorflow.keras as keras
+from tensorflow.keras.datasets import mnist
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Flatten
+from tensorflow.keras.layers import Conv2D, MaxPooling2D
+from tensorflow.keras import backend as K
 
-tf.logging.set_verbosity(tf.logging.ERROR)
-
-mnist = input_data.read_data_sets("./MNIST_data/", one_hot=True)
-
-#
-# hyper parameters
-#
-learning_rate = 0.001
+# input image dimensions
+img_rows, img_cols = 28, 28
+num_classes = 10
 training_epochs = 20
 batch_size = 100
+# the data, split between train and test sets
+(x_train, y_train), (x_test, y_test) = mnist.load_data()
 
-#
-# Model configuration
-#
-X = tf.placeholder(tf.float32, [None, 28, 28, 1], name='data')
-Y = tf.placeholder(tf.float32, [None, 10])
+x_train = x_train.astype('float32')
+x_test = x_test.astype('float32')
+x_train /= 255
+x_test /= 255
 
-conv1 = tf.layers.conv2d(X, 32, [3, 3], padding="same", activation=tf.nn.relu)
-pool1 = tf.layers.max_pooling2d(conv1, [2, 2], strides=2, padding="same")
+y_train = keras.utils.to_categorical(y_train, num_classes)
+y_test = keras.utils.to_categorical(y_test, num_classes)
 
-conv2 = tf.layers.conv2d(pool1, 64, [3, 3], padding="same", activation=tf.nn.relu)
-pool2 = tf.layers.max_pooling2d(conv2, [2, 2], strides=2, padding="same")
+if K.image_data_format() == 'channels_first':
+    x_train = x_train.reshape(x_train.shape[0], 1, img_rows, img_cols)
+    x_test = x_test.reshape(x_test.shape[0], 1, img_rows, img_cols)
+    input_shape = (1, img_rows, img_cols)
+else:
+    x_train = x_train.reshape(x_train.shape[0], img_rows, img_cols, 1)
+    x_test = x_test.reshape(x_test.shape[0], img_rows, img_cols, 1)
+    input_shape = (img_rows, img_cols, 1)
+    
+model = Sequential()
+model.add(Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=input_shape))
+model.add(MaxPooling2D(pool_size=(2, 2)))
 
-flat3 = tf.contrib.layers.flatten(pool2)
-dense3 = tf.layers.dense(flat3, 256, activation=tf.nn.relu)
+model.add(Conv2D(64, kernel_size=(3, 3), activation='relu'))
+model.add(MaxPooling2D(pool_size=(2, 2)))
 
-logits = tf.layers.dense(dense3, 10, activation=None)
-final_tensor = tf.nn.softmax(logits, name='prob')
+model.add(Flatten())
+model.add(Dense(256, activation='relu'))
+model.add(Dense(num_classes, activation='softmax'))
 
-cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=Y, logits=logits))
-optimizer = tf.train.AdamOptimizer(learning_rate).minimize(cost)
+model.compile(loss=keras.losses.categorical_crossentropy,
+              optimizer=keras.optimizers.Adadelta(),
+              metrics=['accuracy'])
 
-#
-# Training
-#
-with tf.Session() as sess:
-    sess.run(tf.global_variables_initializer())
-    total_batch = int(mnist.train.num_examples / batch_size)
+model.fit(x_train, y_train,
+          batch_size=batch_size,
+          epochs=training_epochs,
+          verbose=1,
+          validation_data=(x_test, y_test))
 
-    print('Start learning!')
-    for epoch in range(training_epochs):
-        total_cost = 0
+import tensorflow as tf
+def freeze_session(session, keep_var_names=None, output_names=None, clear_devices=True):
+    graph = session.graph
+    with graph.as_default():
+        freeze_var_names = list(set(v.op.name for v in tf.global_variables()).difference(keep_var_names or []))
+        output_names = output_names or []
+        output_names += [v.op.name for v in tf.global_variables()]
+        input_graph_def = graph.as_graph_def()
+        if clear_devices:
+            for node in input_graph_def.node:
+                node.device = ""
+        frozen_graph = tf.graph_util.convert_variables_to_constants(
+            session, input_graph_def, output_names, freeze_var_names)
+        return frozen_graph
+    
+from tensorflow.keras import backend as K
 
-        for i in range(total_batch):
-            batch_xs, batch_ys = mnist.train.next_batch(batch_size)
-            batch_xs = batch_xs.reshape(-1, 28, 28, 1)
-            _, cost_val = sess.run([optimizer, cost], feed_dict={
-                                   X: batch_xs, Y: batch_ys})
-            total_cost += cost_val
+frozen_graph = freeze_session(K.get_session(),
+                              output_names=[out.op.name for out in model.outputs])
 
-        print('Epoch:', '%04d' % (epoch + 1), 'Avg. cost = ',
-              '{:.4f}'.format(total_cost/total_batch))
-
-    print('Learning finished!')
-
-    # Freeze variables and save pb file
-    output_graph_def = graph_util.convert_variables_to_constants(
-        sess, sess.graph_def, ['prob'])
-    with gfile.FastGFile('./mnist_cnn.pb', 'wb') as f:
-        f.write(output_graph_def.SerializeToString())
-
-    print('Save done!')
+from tensorflow.python.platform import gfile
+with gfile.FastGFile('./mnist_cnn.pb', 'wb') as f:
+        f.write(frozen_graph.SerializeToString())
